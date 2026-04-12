@@ -1,0 +1,3 @@
+﻿[2026-02-27T13:14:27.906197] Project Dir: C:\The_Day_in_History-20260301\2026\02\2026-02-27-project
+[2026-02-27T13:14:27.906268] Root Dir: C:\The_Day_in_History-20260301
+[2026-02-27T13:14:27.906387] FATAL EXCEPTION: UnicodeEncodeError: 'charmap' codec can't encode character '\u274c' in position 29: character maps to <undefined>
