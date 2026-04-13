@@ -1,9 +1,20 @@
-name: Post-Public-Automation
+name: X-Post-Automation
 
 on:
   schedule:
     - cron: '0 * * * *'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — generate posts but do NOT submit'
+        required: false
+        default: false
+        type: boolean
+      upload_ollama_model:
+        description: 'Pull Ollama model and upload to Google Drive (one-time setup)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   run-x-post:
@@ -91,12 +102,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb libgbm1 ffmpeg
-          sudo apt-get install -y python3-tk python3-dev scrot gnome-screenshot x11vnc novnc websockify xclip xsel
-          sudo apt-get install -y tesseract-ocr libtesseract-dev openssh-server fluxbox wmctrl
+          sudo apt-get install -y python3-tk python3-dev scrot xclip xsel
+          sudo apt-get install -y tesseract-ocr libtesseract-dev
           wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
+          # Remove stale chromedriver so selenium-manager automatically downloads the compatible version
+          sudo find /usr /opt -name "chromedriver" -type f -delete || true
 
       # -------------------------------------------------------
       # LLM SOURCE 1: ANTIGRAVITY MANAGER (PRIMARY)
@@ -142,12 +155,15 @@ jobs:
 
       - name: Verify GitHub Models API
         run: |
+          echo "Testing GitHub Models connectivity..."
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${{ secrets.GH_MODELS_TOKEN }}" \
             https://models.inference.ai.azure.com/models)
           if [ "$RESPONSE" = "200" ]; then
+            echo "✅ GitHub Models API: OK"
             echo "GH_MODELS_AVAILABLE=true" >> $GITHUB_ENV
           else
+            echo "⚠️ GitHub Models API: HTTP $RESPONSE"
             echo "GH_MODELS_AVAILABLE=false" >> $GITHUB_ENV
           fi
 
@@ -161,6 +177,7 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/lib/android
           docker image prune -f || true
+          df -h
 
       - name: Install and Start Ollama
         run: |
@@ -168,6 +185,7 @@ jobs:
           mkdir -p logs
           OLLAMA_HOST=0.0.0.0 ollama serve > logs/ollama_server.log 2>&1 &
           sleep 5
+          echo "✅ Ollama server started"
 
       - name: Cache Ollama model
         uses: actions/cache@v4
@@ -191,6 +209,7 @@ jobs:
         if: steps.cache-ollama-model.outputs.cache-hit != 'true'
         run: |
           if [ -f "ollama_model_drive_id.txt" ]; then
+            echo "Cache miss — restoring Ollama model from Google Drive..."
             .venv/bin/python - <<'EOF'
           from googleapiclient.discovery import build
           from google.oauth2.credentials import Credentials
@@ -199,34 +218,57 @@ jobs:
 
           token_file = 'token.json'
           if not os.path.exists(token_file):
+              print("No token.json — skipping Drive restore")
               exit(0)
 
           model_id = open('ollama_model_drive_id.txt').read().strip()
           creds = Credentials.from_authorized_user_file(token_file)
           service = build('drive', 'v3', credentials=creds)
 
+          print(f"Downloading model archive from Drive (id={model_id})...")
           request = service.files().get_media(fileId=model_id)
           with open('/tmp/ollama-llama3.2-3b.tar.gz', 'wb') as f:
               downloader = MediaIoBaseDownload(f, request)
               done = False
               while not done:
                   status, done = downloader.next_chunk()
+                  print(f"  {int(status.progress() * 100)}%")
+          print("Download complete.")
           EOF
             mkdir -p ~/.ollama/models
             tar -xzf /tmp/ollama-llama3.2-3b.tar.gz -C ~/.ollama/models
+            echo "✅ Ollama model restored from Google Drive"
+          else
+            echo "No Drive model ID found — will pull from Ollama registry"
           fi
 
       - name: Pull Ollama model (if not cached or restored)
         if: steps.cache-ollama-model.outputs.cache-hit != 'true'
         run: |
           if [ ! -d ~/.ollama/models/manifests ]; then
+            echo "Pulling llama3.2:3b from Ollama registry..."
             ollama pull llama3.2:3b
+            echo "✅ Model pulled"
+          else
+            echo "✅ Model already present (restored from Drive)"
           fi
 
       - name: Upload Ollama model to Google Drive (one-time setup)
         if: ${{ github.event.inputs.upload_ollama_model == 'true' }}
         run: |
+          echo "=== Searching for Ollama model files ==="
+          find / -name "*.gguf" 2>/dev/null || true
+          find / -path "*ollama*" -name "manifest*" 2>/dev/null || true
+
+          echo "=== Checking common paths ==="
+          ls -la $HOME/.ollama/ 2>/dev/null || echo "~/.ollama not found"
+          ls -la /usr/share/ollama/ 2>/dev/null || echo "/usr/share/ollama not found"
+          ls -la /root/.ollama/ 2>/dev/null || echo "/root/.ollama not found"
+
+          echo "=== Ollama info ==="
           ollama list
+          which ollama
+          ollama --version
 
       - name: Verify Ollama model ready
         run: |
@@ -246,109 +288,15 @@ jobs:
           echo "XAUTHORITY=$HOME/.Xauthority" >> $GITHUB_ENV
           sleep 5
 
-      - name: Create X Session
-        run: |
-          echo "{
-            \"auth_token\": \"${{ secrets.X_AUTH_TOKEN }}\",
-            \"ct0\": \"${{ secrets.X_CSRF_TOKEN }}\",
-            \"username\": \"${{ secrets.X_USERNAME }}\"
-          }" > /tmp/x_session.json
-
-      # -------------------------------------------------------
-      # DEBUG / MANUAL LOGIN MODE
-      # -------------------------------------------------------
-
-      - name: Start Manual Login Session (Debug Mode)
-        if: ${{ github.event.inputs.manual_login == 'true' || github.event.inputs.debug_mode == 'true' }}
-        env:
-          V_URL: https://x.com/home
-        run: |
-          set +e
-          sudo service ssh restart
-          echo "runner:runner" | sudo chpasswd
-
-          fluxbox -display :99 &
-          x11vnc -display :99 -forever -shared -bg -nopw
-          websockify --web /usr/share/novnc 6080 localhost:5900 &
-
-          mkdir -p logs
-          .venv/bin/python v_lib/v_process/controls.py > logs/controls_tk.log 2>&1 &
-          .venv/bin/python scripts/web_controls.py > logs/web_controls.log 2>&1 &
-
-          google-chrome \
-            --no-sandbox \
-            --disable-dev-shm-usage \
-            --disable-gpu \
-            --remote-debugging-port=9222 \
-            --disable-session-crashed-bubble \
-            --no-first-run \
-            --no-default-browser-check \
-            --disable-infobars \
-            --window-size=1300,1080 \
-            --window-position=0,0 \
-            --user-data-dir="$HOME/.browser-session" \
-            "${V_URL}" > logs/chrome_startup.log 2>&1 &
-
-          sudo apt-get install -y tmate
-          tmate -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
-
-          if [ "${{ github.event.inputs.manual_login }}" = "false" ]; then
-            touch /tmp/run_x_post
-          fi
-
-          # Main Event Loop
-          while true; do
-            if [ -f /tmp/save ]; then
-              break
-            fi
-
-            if [ -f /tmp/run_x_post ]; then
-              rm /tmp/run_x_post
-              DRY_RUN_ARG=""
-              if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-                DRY_RUN_ARG="--dry-run"
-              fi
-              .venv/bin/python scripts/post_to_x.py $DRY_RUN_ARG 2>&1 | tee -a logs/x_post.log || true
-            fi
-
-            if [ -f /tmp/run_x_actions ]; then
-              rm /tmp/run_x_actions
-              .venv/bin/python scripts/x_actions.py 2>&1 | tee -a logs/x_actions.log || true
-            fi
-
-            if [ -f /tmp/load_chrome ]; then
-              pkill google-chrome || true
-              google-chrome \
-                --no-sandbox \
-                --disable-dev-shm-usage \
-                --disable-gpu \
-                --remote-debugging-port=9222 \
-                --disable-session-crashed-bubble \
-                --no-first-run \
-                --no-default-browser-check \
-                --disable-infobars \
-                --window-size=1280,960 \
-                --window-position=0,0 \
-                --user-data-dir="$HOME/.browser-session" \
-                "https://x.com/home" > logs/chrome_startup.log 2>&1 &
-              rm /tmp/load_chrome
-            fi
-
-            sleep 2
-          done
-
       # -------------------------------------------------------
       # NORMAL RUN
       # -------------------------------------------------------
 
       - name: Run X-Post
-        if: ${{ github.event.inputs.manual_login != 'true' && github.event.inputs.debug_mode != 'true' }}
         env:
           V_URL: https://x.com/home
         run: |
           mkdir -p logs
-          sleep 3
 
           google-chrome \
             --no-sandbox \
@@ -379,9 +327,10 @@ jobs:
       - name: Commit and Push State Changes
         if: always()
         run: |
-          git add posted-ids.json
+          touch posted-ids.json
+          git add posted-ids.json || true
           git commit -m "Update posted IDs [skip ci]" || echo "No changes to commit"
-          git push origin HEAD
+          git push origin HEAD || true
 
       - name: Save Antigravity Data Session
         if: always()

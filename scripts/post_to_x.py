@@ -26,6 +26,12 @@ import os
 import re
 import json
 import time
+
+# Force unbuffered output for the whole script
+import builtins
+def print(*args, **kwargs):
+    kwargs.setdefault('flush', True)
+    builtins.print(*args, **kwargs)
 import argparse
 import pickle
 import io
@@ -334,13 +340,32 @@ Post:"""
         }
         
         try:
-            print(f"  ⏳ Submitting prompt to LLM (timeout 60s)...")
+            print(f"  🔗 Target URL: {url}")
+            print(f"  🤖 Model: {model_name}")
+            payload_str = json.dumps(payload)
+            payload_bytes = payload_str.encode()
+            print(f"  📦 Payload size: {len(payload_bytes)} bytes")
+            print(f"  ⏳ Sending HTTP POST request (等待...)")
             sys.stdout.flush()
+            
             req = urllib.request.Request(
-                url, data=json.dumps(payload).encode(), headers=headers, method='POST'
+                url, data=payload_bytes, headers=headers, method='POST'
             )
-            resp = urllib.request.urlopen(req, timeout=60)
-            data = json.loads(resp.read().decode())
+            
+            start_time = time.time()
+            resp = urllib.request.urlopen(req, timeout=180)
+            elapsed_time = time.time() - start_time
+            
+            print(f"  ✅ Received HTTP response in {elapsed_time:.2f}s! Status: {resp.status}")
+            sys.stdout.flush()
+            
+            print(f"  ⏳ Reading response content...")
+            sys.stdout.flush()
+            raw_response = resp.read().decode()
+            
+            print(f"  ⏳ Parsing JSON...")
+            sys.stdout.flush()
+            data = json.loads(raw_response)
             text = data['choices'][0]['message']['content'].strip().strip('"\'')
             print(f"[LLM RESPONSE] ({len(text)} chars)\n{text}\n")
             
@@ -590,7 +615,7 @@ def main():
         
         driver.get("https://x.com/home")
         try:
-            WebDriverWait(driver, 15).until(EC.presence_of_element_located(
+            WebDriverWait(driver, 30).until(EC.presence_of_element_located(
                 (By.CSS_SELECTOR, '[data-testid="AppTabBar_Home_Link"]')
             ))
             print("  ✅ Authenticated on X.\n")
@@ -645,6 +670,10 @@ def main():
                 if posts_done < MAX_POSTS_PER_RUN:
                     print("⏳ Waiting 10 minutes (600s) before next post...")
                     time.sleep(600 if not IS_DRY_RUN else 5)
+                    
+                    # Recreate Google Drive service to prevent stale connection errors
+                    if service:
+                        service = get_drive_service()
                 
     if posts_done == 0:
         print("✅ No unposted projects found in the lookback period.")
