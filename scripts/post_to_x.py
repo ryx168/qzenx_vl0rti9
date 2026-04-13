@@ -207,7 +207,7 @@ def read_file_content(service, folder_id, filename, is_local=False) -> str:
         return ""
     from googleapiclient.http import MediaIoBaseDownload
     q = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
-    r = service.files().list(q=q, fields='files(id)').execute()
+    r = service.files().list(q=q, fields='files(id)').execute(num_retries=3)
     files = r.get('files', [])
     if not files:
         return ""
@@ -226,7 +226,7 @@ def download_drive_folder_contents(service, folder_id, local_dir: Path):
         local_dir.mkdir(parents=True, exist_ok=True)
     from googleapiclient.http import MediaIoBaseDownload
     q = f"'{folder_id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed=false"
-    results = service.files().list(q=q, fields='files(id,name)').execute()
+    results = service.files().list(q=q, fields='files(id,name)').execute(num_retries=3)
     files = results.get('files', [])
     if not files:
         return
@@ -253,13 +253,13 @@ def has_file(service, folder_id, filename, is_local=False):
     if is_local:
         return (Path(folder_id) / filename).exists()
     q = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
-    r = service.files().list(q=q, fields='files(id)').execute()
+    r = service.files().list(q=q, fields='files(id)').execute(num_retries=3)
     return len(r.get('files', [])) > 0
 
 
 def find_folder(service, parent_id, name):
     q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and '{parent_id}' in parents and trashed=false"
-    r = service.files().list(q=q, fields='files(id,name)').execute()
+    r = service.files().list(q=q, fields='files(id,name)').execute(num_retries=3)
     files = r.get('files', [])
     return files[0]['id'] if files else None
 
@@ -268,11 +268,11 @@ def check_has_mp4(service, folder_id, is_local=False):
     if is_local:
         return any(f.name.lower().endswith('.mp4') for f in Path(folder_id).iterdir() if f.is_file())
     q = f"mimeType='video/mp4' and '{folder_id}' in parents and trashed=false"
-    r = service.files().list(q=q, fields='files(id)').execute()
+    r = service.files().list(q=q, fields='files(id)').execute(num_retries=3)
     if len(r.get('files', [])) > 0:
         return True
     q_name = f"name contains '.mp4' and '{folder_id}' in parents and trashed=false"
-    r_name = service.files().list(q=q_name, fields='files(id)').execute()
+    r_name = service.files().list(q=q_name, fields='files(id)').execute(num_retries=3)
     return len(r_name.get('files', [])) > 0
 
 
@@ -287,7 +287,7 @@ def list_projects(service, year, month, date_str):
         print(f"ℹ️ No folder for {date_str} yet.")
         return []
     q = f"'{date_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    r = service.files().list(q=q, fields='files(id,name,modifiedTime)').execute()
+    r = service.files().list(q=q, fields='files(id,name,modifiedTime)').execute(num_retries=3)
     folders = r.get('files', [])
     print(f"Found {len(folders)} project(s) for {date_str}.")
     return folders
@@ -573,7 +573,7 @@ def process_project(target_project, service, year, month, date_str, session, dri
                     from googleapiclient.http import MediaFileUpload
                     file_metadata = {'name': 'x_post.json', 'parents': [original_drive_id]}
                     media = MediaFileUpload(str(x_post_path), mimetype='application/json')
-                    service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                    service.files().create(body=file_metadata, media_body=media, fields='id').execute(num_retries=3)
                     print("  ☁️ Upload complete.")
 
                 print(f"\n{'='*60}")
@@ -673,6 +673,10 @@ def main():
                     
                     # Recreate Google Drive service to prevent stale connection errors
                     if service:
+                        try:
+                            service.close()
+                        except AttributeError:
+                            pass
                         service = get_drive_service()
                 
     if posts_done == 0:
