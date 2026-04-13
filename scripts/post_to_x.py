@@ -503,10 +503,11 @@ def post_tweet(driver, text: str, media_path: str = None):
 
 
 # ── Post one project ──────────────────────────────────────────────────────────
-def process_project(service, project: dict, driver, session: dict, posted_ids: list) -> bool:
+def process_project(service, project: dict, driver, session: dict, posted_ids: list) -> tuple:
     """
     Generate and post a single project.
-    Returns True on success, False on failure.
+    Returns (success: bool, driver, session) — driver/session may be
+    initialized here on first call so the caller can reuse them.
     """
     year        = project['_year']
     month       = project['_month']
@@ -545,7 +546,7 @@ def process_project(service, project: dict, driver, session: dict, posted_ids: l
     post_text = generate_post(title, lyrics, charactor, date_str).strip().strip('"\'')
     if not post_text:
         print("  ❌ Could not generate post text. Skipping.")
-        return False
+        return False, driver, session
 
     print(f"  Post ({len(post_text)} chars): {post_text}")
 
@@ -553,11 +554,20 @@ def process_project(service, project: dict, driver, session: dict, posted_ids: l
 
     if IS_DRY_RUN:
         print(f"  [Dry Run] Would post and create {x_post_path}")
-        return True
+        return True, driver, session
 
     local_dest.mkdir(parents=True, exist_ok=True)
 
-    # Authenticate
+    # ── Lazy-init session + browser on first real post ────────────────────────
+    if session is None:
+        if not SESSION_FILE.exists():
+            print(f"  ❌ No session file at {SESSION_FILE}. Cannot post.")
+            return False, driver, session
+        session = json.loads(SESSION_FILE.read_text())
+
+    if driver is None:
+        driver = get_driver()
+
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
@@ -571,7 +581,7 @@ def process_project(service, project: dict, driver, session: dict, posted_ids: l
         ))
     except TimeoutException:
         print("  ❌ Auth failed — check cookies.")
-        return False
+        return False, driver, session
 
     try:
         post_url = post_tweet(driver, post_text, media_path=mp4_path)
@@ -590,11 +600,11 @@ def process_project(service, project: dict, driver, session: dict, posted_ids: l
             media = MediaFileUpload(str(x_post_path), mimetype='application/json')
             service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-        return True
+        return True, driver, session
 
     except Exception as e:
         print(f"  ❌ Failed to post: {e}")
-        return False
+        return False, driver, session
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -608,18 +618,12 @@ def main():
     print(f"Wait between posts: {POST_WAIT_SECONDS // 60} min")
     print(f"{'='*60}\n")
 
-    if not SESSION_FILE.exists():
-        print(f"❌ No session file at {SESSION_FILE}. Exiting.")
-        sys.exit(1)
-    session = json.loads(SESSION_FILE.read_text())
-
     service    = get_drive_service()
     posted_ids = load_posted_ids()
 
-    # ── Set up browser once ───────────────────────────────────────────────────
-    driver = None
-    if not IS_DRY_RUN:
-        driver = get_driver()
+    # ── Browser + session are initialized lazily on first post ───────────────
+    driver  = None
+    session = None
 
     # ── Lazy generator: scans one date at a time, yields projects immediately.
     # Posting starts as soon as today's first project is found — no full
@@ -647,7 +651,7 @@ def main():
             print(f"\nReached max posts limit ({MAX_POSTS}). Stopping.")
             break
 
-        success = process_project(service, project, driver, session, posted_ids)
+        success, driver, session = process_project(service, project, driver, session, posted_ids)
         if success:
             posted_count += 1
 
